@@ -513,12 +513,12 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-    #     # Save checkpoint
-    #     if args.rank == 0 and epoch % args.checkpointing_steps == 0:
-    #         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-    #         os.makedirs(save_path, exist_ok=True)
-    #         unet.module.save_pretrained(save_path) if args.world_size > 1 else unet.save_pretrained(save_path)
-    #         tokenizer.save_pretrained(save_path)
+        # Save checkpoint
+        if args.rank == 0 and epoch % args.checkpointing_steps == 0:
+            save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+            os.makedirs(save_path, exist_ok=True)
+            unet.module.save_pretrained(save_path)
+            tokenizer.save_pretrained(save_path)
 
     # Final cleanup
     cleanup_distributed()
