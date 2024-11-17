@@ -22,14 +22,13 @@ from datasets import load_dataset
 
 from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
-from diffusers.utils import is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
-if is_wandb_available():
-    import wandb
+import tqdm
+import time
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+
 
 DATASET_NAME_MAPPING = {
     "lambdalabs/naruto-blip-captions": ("image", "text"),
@@ -193,8 +192,40 @@ def rank0_first():
         yield
     dist.barrier()
 
+
+class LocalTimer:
+    def __init__(self, device: torch.device):
+        if device.type == "cpu":
+            self.synchronize = lambda: torch.cpu.synchronize(device=device)
+        elif device.type == "cuda":
+            self.synchronize = lambda: torch.cuda.synchronize(device=device)
+        self.measurements = []
+        self.start_time = None
+
+    def __enter__(self):
+        self.synchronize()
+        self.start_time = time.time()
+        return self
+
+    def __exit__(self, type, value, traceback):
+        if traceback is None:
+            self.synchronize()
+            end_time = time.time()
+            self.measurements.append(end_time - self.start_time)
+        self.start_time = None
+
+    def avg_elapsed_ms(self):
+        return 1000 * (sum(self.measurements) / len(self.measurements))
+
+    def reset(self):
+        self.measurements = []
+        self.start_time = None
+
+
 def main():
     args = parse_args()
+    
+    torch.manual_seed(args.seed)
 
     if args.allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -205,14 +236,17 @@ def main():
     local_rank = rank % torch.cuda.device_count()
     world_size = dist.get_world_size()
 
-    torch.manual_seed(args.seed)
-    device = torch.device(f"cuda:{local_rank}")
+
+    logging.basicConfig(
+        format=f"[rank={rank}] [%(asctime)s] %(levelname)s:%(message)s",
+        level=logging.INFO,
+    )
+    logger.info(os.environ)
+    logger.info(args)
+    logger.info(f"rank={rank} world size={world_size}")
 
     device = torch.device(f"cuda:{local_rank}")
-    dtype = torch.bfloat16
     torch.cuda.set_device(device)
-
-    torch.manual_seed(args.seed)
 
     with rank0_first():
         with device:
@@ -327,43 +361,87 @@ def main():
         num_workers=args.dataloader_num_workers,
     )
 
+    state = {
+        "epoch": 0,
+        "global_step": 0,
+        "epoch_step": 0,
+        "running_loss": 0,
+    }
+
+    timers = {k: LocalTimer(device) for k in ["data", "forward", "backward", "update"]}
+    
     # Train loop
     global_step = 0
-    for epoch in range(args.num_train_epochs):
-        for step, batch in enumerate(train_dataloader):
-            print(global_step)
-            pixel_values, input_ids = batch["pixel_values"].to(device), batch["input_ids"].to(device)
-            latents = vae.encode(pixel_values).latent_dist.sample() * vae.config.scaling_factor
-            noise = torch.randn_like(latents)
-            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],)).to(device)
-            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-            encoder_hidden_states = text_encoder(input_ids)[0]
-            model_pred = unet(noisy_latents, timesteps, encoder_hidden_states)[0]
-            loss = F.mse_loss(model_pred.float(), noise.float())
+    for state["epoch"] in range(args.num_train_epochs):
+        logger.info(f"Begin epoch {state['epoch']} at step {state['epoch_step']}")
+        progress_bar = tqdm.tqdm(range(len(train_dataloader)), disable=rank > 0)
+        if state["epoch_step"] > 0:
+            progress_bar.update(state["epoch_step"])
+        
+        batches = iter(train_dataloader)
 
-            optimizer.zero_grad()
-            loss.backward()
-            if args.max_grad_norm:
-                torch.nn.utils.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
-            optimizer.step()
-            lr_scheduler.step()
+        for i_step in range(len(train_dataloader)):
+            with timers["data"], torch.no_grad():
+                batch = next(batches)
+                pixel_values, input_ids = batch["pixel_values"].to(device), batch["input_ids"].to(device)
             
-            global_step += 1
-            if args.rank == 0 and global_step % args.logging_steps == 0:
-                logger.info(f"Step: {global_step}, Loss: {loss.item()}")
-            if global_step >= args.max_train_steps:
-                save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                os.makedirs(save_path, exist_ok=True)
-                unet.module.save_pretrained(save_path)
-                tokenizer.save_pretrained(save_path)
-                break
+            with timers["forward"]:
+                latents = vae.encode(pixel_values).latent_dist.sample() * vae.config.scaling_factor
+                noise = torch.randn_like(latents)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],)).to(device)
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                encoder_hidden_states = text_encoder(input_ids)[0]
+                model_pred = unet(noisy_latents, timesteps, encoder_hidden_states)[0]
+            
+            with timers["backward"]:
+                loss = F.mse_loss(model_pred.float(), noise.float())
+                optimizer.zero_grad()
+                loss.backward()
 
+            with timers["update"]:    
+                if args.max_grad_norm:
+                    torch.nn.utils.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
+                optimizer.step()
+                lr_scheduler.step()
+
+            state["global_step"] += 1
+            state["epoch_step"] += 1
+            state["running_loss"] += loss.item()
+            progress_bar.update(1)
+
+            if args.rank == 0 and state["global_step"] % args.logging_steps == 0:
+                samples_per_step = world_size * args.train_batch_size
+                ms_per_step = sum(t.avg_elapsed_ms() for t in timers.values())
+
+                info = {
+                    "global_step": state["global_step"],
+                    "lr": lr_scheduler.get_last_lr()[0],
+                    "running_loss": state["running_loss"] / args.logging_steps,
+                    "epoch": state["epoch"],
+                    "epoch_progress": state["epoch_step"] / len(train_dataloader),
+                    "num_batches_remaining": len(train_dataloader) - i_step,
+                    "samples/s": 1000 * samples_per_step / ms_per_step,
+                    "time/total": ms_per_step,
+                    **{
+                        f"time/{k}": timer.avg_elapsed_ms()
+                        for k, timer in timers.items()
+                    },
+                }
+
+                logger.info(info)
+                state["running_loss"] = 0
+                for t in timers.values():
+                    t.reset()
+                
             # Save checkpoint
-            if args.rank == 0 and global_step % args.checkpointing_steps == 0:
-                save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+            if (args.rank == 0 and state["global_step"] % args.checkpointing_steps == 0) or state["global_step"] >= args.max_train_steps:
+                save_path = os.path.join(args.output_dir, "checkpoint-" + str({state["global_step"]}))
                 os.makedirs(save_path, exist_ok=True)
                 unet.module.save_pretrained(save_path)
                 tokenizer.save_pretrained(save_path)
+
+                if state["global_step"] >= args.max_train_steps:
+                    break
 
     # Final cleanup
     cleanup_distributed()
