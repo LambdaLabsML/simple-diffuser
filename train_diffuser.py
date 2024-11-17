@@ -296,7 +296,7 @@ def parse_args():
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
-        default=500,
+        default=2000,
         help=(
             "Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"
             " training using `--resume_from_checkpoint`."
@@ -490,7 +490,7 @@ def main():
     global_step = 0
     for epoch in range(args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            print(step)
+            print(global_step)
             pixel_values, input_ids = batch["pixel_values"].to(device), batch["input_ids"].to(device)
             latents = vae.encode(pixel_values).latent_dist.sample() * vae.config.scaling_factor
             noise = torch.randn_like(latents)
@@ -511,14 +511,18 @@ def main():
             if args.rank == 0 and global_step % args.logging_steps == 0:
                 logger.info(f"Step: {global_step}, Loss: {loss.item()}")
             if global_step >= args.max_train_steps:
+                save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                os.makedirs(save_path, exist_ok=True)
+                unet.module.save_pretrained(save_path)
+                tokenizer.save_pretrained(save_path)
                 break
 
-        # Save checkpoint
-        if args.rank == 0 and epoch % args.checkpointing_steps == 0:
-            save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-            os.makedirs(save_path, exist_ok=True)
-            unet.module.save_pretrained(save_path)
-            tokenizer.save_pretrained(save_path)
+            # Save checkpoint
+            if args.rank == 0 and global_step % args.checkpointing_steps == 0:
+                save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                os.makedirs(save_path, exist_ok=True)
+                unet.module.save_pretrained(save_path)
+                tokenizer.save_pretrained(save_path)
 
     # Final cleanup
     cleanup_distributed()
