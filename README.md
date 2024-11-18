@@ -12,17 +12,14 @@
 * Install the following dependencies and clone the repo to the shared storage.
 
 ```
-pip install diffusers
-
-# https://github.com/huggingface/datasets/pull/6883
-pip install Pillow==9.4.0
-
-export SHARED_STORAGE=ml-ntexas/chuan
+export SHARED_STORAGE= # Add the name of your shared storage here. e.g. /home/ubuntu/shared
 cd $SHARED_STORAGE && \
-git clone https://github.com/chuanli11/simple-diffuser.git && \
-cd simple-diffuser
+git clone https://github.com/LambdaLabsML/simple-diffuser.git && \
+cd simple-diffuser && \
+pip install -r requirements.txt
 ```
 
+Note: the above `requirements.txt` works out-of-the-box on Lambda stack. You can also create your own virtual environment and use the `requirements_venv.txt` to install PyTorch related dependencies.
 
 ## Usage
 
@@ -38,8 +35,8 @@ export MASTER_PORT=
 
 export MODEL_NAME=CompVis/stable-diffusion-v1-4
 export DATASET_NAME=lambdalabs/naruto-blip-captions
-export HF_HOME=/home/ubuntu/$SHARED_STORAGE/.cache
-export TORCHELASTIC_ERROR_FILE=/home/ubuntu/$SHARED_STORAGE/simple-diffuser/error.json
+export HF_HOME=$SHARED_STORAGE/.cache
+export TORCHELASTIC_ERROR_FILE=$SHARED_STORAGE/simple-diffuser/error.json
 export OMP_NUM_THREADS=1
 
 torchrun \
@@ -49,8 +46,8 @@ torchrun \
     --nnodes $NUM_NODES \
     --nproc-per-node $NUM_GPU_PER_NODE \
     --redirects 3 \
-    --log-dir /home/ubuntu/$SHARED_STORAGE/simple-diffuser/logs \
-    /home/ubuntu/$SHARED_STORAGE/simple-diffuser/train_diffuser.py \
+    --log-dir $SHARED_STORAGE/simple-diffuser/logs \
+    $SHARED_STORAGE/simple-diffuser/train_diffuser.py \
     --pretrained_model_name_or_path=$MODEL_NAME \
     --dataset_name=$DATASET_NAME \
     --resolution=512 --center_crop --random_flip \
