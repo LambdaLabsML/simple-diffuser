@@ -369,7 +369,7 @@ def main():
     }
 
     timers = {k: LocalTimer(device) for k in ["data", "forward", "backward", "update"]}
-    
+
     # Train loop
     global_step = 0
     for state["epoch"] in range(args.num_train_epochs):
@@ -435,7 +435,7 @@ def main():
                 
             # Save checkpoint
             if (args.rank == 0 and state["global_step"] % args.checkpointing_steps == 0) or state["global_step"] >= args.max_train_steps:
-                save_path = os.path.join(args.output_dir, "checkpoint-" + str({state["global_step"]}))
+                save_path = os.path.join(args.output_dir, "checkpoint-" + str(state["global_step"]))
                 os.makedirs(save_path, exist_ok=True)
                 unet.module.save_pretrained(save_path)
                 tokenizer.save_pretrained(save_path)

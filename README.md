@@ -17,7 +17,7 @@ pip install diffusers
 # https://github.com/huggingface/datasets/pull/6883
 pip install Pillow==9.4.0
 
-export SHARED_STORAGE=
+export SHARED_STORAGE=ml-ntexas/chuan
 cd $SHARED_STORAGE && \
 git clone https://github.com/chuanli11/simple-diffuser.git && \
 cd simple-diffuser
@@ -25,9 +25,12 @@ cd simple-diffuser
 
 
 ## Usage
+
+### Training
 Run the following command from all nodes
 
 ```
+export SHARED_STORAGE=
 export NUM_NODES=
 export NUM_GPU_PER_NODE=
 export MASTER_NODE_IP=
@@ -51,12 +54,38 @@ torchrun \
     --pretrained_model_name_or_path=$MODEL_NAME \
     --dataset_name=$DATASET_NAME \
     --resolution=512 --center_crop --random_flip \
-    --train_batch_size=1 \
-    --gradient_accumulation_steps=4 \
-    --gradient_checkpointing \
-    --max_train_steps=100 \
+    --train_batch_size=16 \
+    --max_train_steps=50000 \
+    --checkpointing_steps=500 \
     --learning_rate=1e-05 \
     --max_grad_norm=1 \
     --lr_scheduler="constant" --lr_warmup_steps=0 \
-    --output_dir="sd-naruto-model"
+    --output_dir="sd-naruto-model" \
+    --allow_tf32 \
+    --dataloader_num_workers=16 \
+    --enable_xformers_memory_efficient_attention
 ```
+
+### Inference
+
+```
+import torch
+from diffusers import StableDiffusionPipeline, UNet2DConditionModel
+
+model_path = "./sd-naruto-model/checkpoint-<steps>"
+unet = UNet2DConditionModel.from_pretrained(model_path, torch_dtype=torch.float16)
+
+pipe = StableDiffusionPipeline.from_pretrained(
+    "CompVis/stable-diffusion-v1-4",
+    unet=unet,
+    torch_dtype=torch.float16,
+    safety_checker = None,
+    requires_safety_checker = False)
+pipe.to("cuda")
+
+image = pipe(prompt="Yoda").images[0]
+image.save("yoda-ninja.png")
+```
+
+You will get something like the image below
+![Example](./yoda-ninja.png)
