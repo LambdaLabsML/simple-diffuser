@@ -87,5 +87,6 @@ image = pipe(prompt="Yoda").images[0]
 image.save("yoda-ninja.png")
 ```
 
-You will get something like the image below
+You will get something like the image below:
+
 ![Example](./yoda-ninja.png)
